@@ -1,0 +1,260 @@
+import os
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from src.ensemble_model import EnsembleModel
+from ids_ips.integration import IDS_IPS_Integration
+#from kafka_broker import KafkaProducer
+from src.utils.logger import get_logger
+from hdfs import InsecureClient
+import subprocess
+import sys
+import numpy as np
+import logging
+import tracemalloc  # For memory profiling
+import gc  # For memory release
+import time
+
+# Add the BustedURLv2 folder to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# Initialize logger
+logger = get_logger("MainLogger")
+
+# HDFS setup
+#HDFS_URL = "http://localhost:9000"
+#HDFS_PATH = "/phishing_urls/collected_urls.txt"
+#LOCAL_FILE_PATH = "/tmp/collected_urls.txt"
+LOCAL_FILE_PATH = "dataset/urldata.csv"
+
+# Define batch size
+BATCH_SIZE = 100  # Adjust based on system capabilities
+CHUNK_SIZE = 10000  # Define the chunk size for incremental training
+#CHUNK_SIZE = 450175
+
+def fetch_data_from_hdfs():
+    """Fetch the latest data from HDFS and store it locally for model training."""
+    logger.info("Fetching data from HDFS using HDFS CLI...")
+
+    """
+    try:
+        if os.path.exists(LOCAL_FILE_PATH):
+            logger.info(f"Removing existing local file: {LOCAL_FILE_PATH}")
+            os.remove(LOCAL_FILE_PATH)
+
+        cmd = f"/home/yzhang10/hadoop/bin/hdfs dfs -get {HDFS_PATH} {LOCAL_FILE_PATH}"
+        subprocess.run(cmd, shell=True, check=True)
+
+        logger.info(f"Data successfully fetched from HDFS and saved to {LOCAL_FILE_PATH}")
+
+        data = pd.read_csv(LOCAL_FILE_PATH, header=None, names=['url', 'label'], on_bad_lines='skip')
+        logger.info(f"Data loaded successfully with {len(data)} rows.")
+        return data
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to fetch data from HDFS using CLI: {str(e)}")
+        return None
+    """
+
+    data = pd.read_csv(LOCAL_FILE_PATH, header=None)
+    data = data.dropna().reset_index(drop=True)
+    data = data.drop(data.columns[0], axis=1)
+    data = data.drop(data.columns[1], axis=1)
+    data.columns = ['url', 'label']
+    data = data.sample(frac=1).reset_index(drop=True)
+    data['label'] = pd.to_numeric(data['label'], errors='coerce')
+    data['label'] = data['label'].astype(int)
+    str_rows = data[data['label'].apply(lambda x: isinstance(x, str))]
+    print(str_rows)
+    logger.info(f"Data loaded successfully with {len(data)} rows.")
+    return data
+
+def batch_process_data(model, X_raw, y, batch_size=BATCH_SIZE):
+    """Process data in batches using stratified sampling and evaluate metrics."""
+    from sklearn.model_selection import train_test_split
+
+    # Memory profiling
+    tracemalloc.start()
+    start_snapshot = tracemalloc.take_snapshot()
+
+    X_train, _, y_train, _ = train_test_split(X_raw, y, test_size=0.3, stratify=y)
+    
+    num_batches = len(X_train) // batch_size + (1 if len(X_train) % batch_size != 0 else 0)
+    skipped_batches = []
+
+    # Initialize lists to store true labels, predictions, and prediction probabilities for metrics calculation
+    all_y_true = []
+    all_y_pred = []
+    all_y_pred_proba = []  # For storing predicted probabilities
+
+    for batch_num in range(num_batches):
+        start_idx = batch_num * batch_size
+        end_idx = min(start_idx + batch_size, len(X_train))
+        X_batch_raw = X_train[start_idx:end_idx]
+        y_batch = y_train[start_idx:end_idx]
+
+        # Ensure X_batch_raw is a list of strings
+        X_batch = [str(url) for url in X_batch_raw]
+        logging.info(f"Processing batch {batch_num + 1}/{num_batches}...")
+
+        # Check if the batch contains at least two classes
+        if len(set(y_batch)) < 2:
+            logging.warning(f"Skipping batch {batch_num + 1} due to only one class present.")
+            skipped_batches.append((X_batch, y_batch))
+            continue
+
+        # Train the model on this batch
+        try:
+            model.train_on_batch(X_batch, y_batch)
+
+            # Extract features and get predictions and probabilities after training for metrics calculation
+            features = model.extract_features(X_batch)
+            y_pred = model.classify(features)
+            y_pred_proba = model.classify_proba(features)  # Get predicted probabilities for ROC AUC
+            all_y_true.extend(y_batch)
+            all_y_pred.extend(y_pred)
+            all_y_pred_proba.extend(y_pred_proba)  # Store the probabilities
+
+        except ValueError as e:
+            logging.error(f"Failed to train on batch {batch_num + 1}: {e}")
+            continue
+
+    # Calculate metrics after processing all batches
+    if all_y_true and all_y_pred:
+        # Convert lists to numpy arrays for metric calculation
+        all_y_true = np.array(all_y_true)
+        all_y_pred = np.array(all_y_pred)
+        all_y_pred_proba = np.array(all_y_pred_proba)
+
+        # Use model's calculate_metrics method to compute and log metrics
+        metrics = model.calculate_metrics(all_y_true, all_y_pred, all_y_pred_proba)  # Pass predicted probabilities for ROC AUC
+        logging.info(f"Final training metrics: {metrics}")
+
+        # Memory profiling after training
+        end_snapshot = tracemalloc.take_snapshot()
+        memory_diff = end_snapshot.compare_to(start_snapshot, 'lineno')
+        for stat in memory_diff[:10]:
+            logging.info(f"Memory usage after batch processing: {stat}")
+    else:
+        logging.warning("No valid batches were processed for metric calculation.")
+
+def incremental_training(model, dataset, chunk_size=CHUNK_SIZE):
+    """Train the model incrementally in chunks."""
+    num_rows = len(dataset)
+    num_chunks = num_rows // chunk_size + (1 if num_rows % chunk_size != 0 else 0)
+
+    for i in range(num_chunks):
+        start_idx = i * chunk_size
+        end_idx = min(start_idx + chunk_size, num_rows)
+
+        logger.info(f"Processing chunk {i + 1} with {end_idx - start_idx} rows.")
+        chunk = dataset.iloc[start_idx:end_idx]
+        X_chunk, y_chunk = chunk['url'].values, chunk['label'].values
+
+        # Call the train_on_batch method to process each chunk
+        model.fit(X_chunk, y_chunk)
+
+        # Explicit memory cleanup after each chunk
+        gc.collect()
+
+def run_real_time_mode():
+    """Keep system running in real-time mode for manual test invocation."""
+    logger.info("System is running in real-time mode.")
+    ids_ips = IDS_IPS_Integration()  # Initialize IDS/IPS system
+
+    # Infinite loop simulating the system running indefinitely
+    while True:
+        time.sleep(10)  # Adjust this delay if needed
+
+def main():
+    logger.info("Starting BustedURL system...")
+
+    # Initialize the ensemble model
+    model = EnsembleModel()
+
+    # Fetch the real-time dataset from HDFS
+    dataset = fetch_data_from_hdfs()
+
+    if dataset is not None:
+        # Process and train the model in chunks for incremental learning
+        incremental_training(model, dataset)
+
+        # Save the trained model
+        model.save_model('models/ensemble_model.pkl')
+        logger.info("Model training completed and saved.")
+    
+        # Evaluate model on the full dataset
+        features = model.extract_features(dataset['url'].values)
+        y_pred = model.classify(features)
+        str_rows = dataset[dataset['label'].apply(lambda x: isinstance(x, str))]
+        print(str_rows)
+        metrics = model.calculate_metrics(dataset['label'].values, y_pred, model.classify_proba(features))
+        
+        logger.info(f"Final Training Metrics: {metrics}")
+      
+    # Start Kafka Producer (replace KafkaBroker with KafkaProducer)
+#    kafka_producer = KafkaProducer()
+
+    # Start real-time mode
+    logger.info("System is now running in real-time mode.")
+    run_real_time_mode()
+
+def process_url(url, ids_ips, summary):
+    """Process URL using IDS/IPS and Ensemble Model, update summary."""
+    result = ids_ips.process_incoming_url(url)
+    
+    if result == "blocked":
+        summary['blocked'] += 1
+    else:
+        summary['allowed'] += 1
+    
+    # Just logging the summary for each URL processed
+    logger.info(f"URL {url} processed with result: {result}")
+
+def real_time_test(model, ids_ips, dataset, num_urls=500):
+    """Run a real-time test with a specified number of URLs."""
+    logger.info(f"Running real-time test with {num_urls} URLs.")
+    
+    # Randomly sample 500 URLs from the dataset
+    sampled_data = dataset.sample(n=num_urls, random_state=42)
+    
+    # Initialize summary counters
+    summary = {'blocked': 0, 'allowed': 0}
+
+    # Process URLs
+    for _, row in sampled_data.iterrows():
+        process_url(row['url'], ids_ips, summary)
+
+    # Print summary after processing
+    logger.info(f"Real-Time Test Summary: {summary['blocked']} URLs blocked, {summary['allowed']} URLs allowed.")
+
+    # Also print to the console
+    print(f"Real-Time Test Summary: {summary['blocked']} URLs blocked, {summary['allowed']} URLs allowed.")
+
+def run_real_time_mode():
+    """Keep system running in real-time mode for manual test invocation."""
+    logger.info("System is running in real-time mode.")
+    ids_ips = IDS_IPS_Integration()  # Initialize IDS/IPS system
+
+    # Infinite loop simulating the system running indefinitely
+    while True:
+        # Wait for manual real-time tests
+        print("\nReal-Time Testing Menu")
+        print("1. Run Basic Real-Time Test")
+        print("2. Run Load Test")
+        print("3. Exit")
+        choice = input("Enter your choice: ")
+
+        if choice == '1':
+            dataset = fetch_data_from_hdfs()
+            if dataset is not None:
+                real_time_test(None, ids_ips, dataset, num_urls=500)
+        elif choice == '2':
+            print("Load Test feature not implemented yet.")
+        elif choice == '3':
+            print("Exiting real-time mode.")
+            break
+        else:
+            print("Invalid choice. Please select again.")
+
+if __name__ == "__main__":
+    main()

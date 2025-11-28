@@ -26,14 +26,21 @@ def run_real_time_test(dataset, num_urls=500):
     ids_ips = IDS_IPS_Integration()  # Initialize IDS/IPS
     url_chunk = dataset['url'].sample(num_urls).values  # Random sample of URLs
 
+    summary = {'blocked': 0, 'allowed': 0}
+
     for url in url_chunk:
-        process_url(url, ids_ips)
+        process_url(url, ids_ips, summary)
         logger.info(f"Processed URL: {url}")
         time.sleep(0.5)  # Adjust the delay as needed to simulate real-time analysis
 
 def real_time_menu():
     """Provide a manual interface for running real-time tests."""
-    dataset = pd.read_csv('/tmp/collected_urls.txt', header=None, names=['url', 'label'])
+#    dataset = pd.read_csv('/tmp/collected_urls.txt', header=None, names=['url', 'label'])
+    dataset = pd.read_csv('dataset/urldata.csv', header=None)
+    dataset = dataset.dropna().reset_index(drop=True)
+    dataset = dataset.drop(dataset.columns[0], axis=1)
+    dataset.columns = ["url", "label", "result"]
+    print(dataset.head())
 
     while True:
         print("\nReal-Time Testing Menu")

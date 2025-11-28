@@ -1,0 +1,103 @@
+version: "3.9"
+
+name: bustedurl
+
+services:
+    redis:
+        image: redis:7-alpine
+        container_name: bustedurl-redis
+        ports:
+            - "16379:6379"
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 5s
+            timeout: 3s
+            retries: 20
+        volumes:
+            - redis_data:/data
+
+    kafka:
+        image: confluentinc/cp-kafka:7.6.1
+        container_name: bustedurl-kafka
+        environment:
+            KAFKA_ENABLE_KRAFT: "true"
+
+            CLUSTER_ID: 7GLbmIM0TsG2Z5e4bP4ACw
+            KAFKA_NODE_ID: 1
+            KAFKA_PROCESS_ROLES: broker,controller
+            KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+            KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+            KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+            KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+            KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+            KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+            KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+            KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+            KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+            KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+            KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+        ports:
+            - "9092:9092"
+        healthcheck:
+            test: ["CMD", "bash", "-lc", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+            interval: 10s
+            timeout: 5s
+            retries: 30
+        volumes:
+            - kafka_data:/bitnami/kafka
+
+    app:
+        build: .
+        container_name: bustedurl-app
+        env_file: .env
+        depends_on:
+            kafka:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        command: ["python", "src/main.py"]
+        volumes:
+            - ./:/app
+            - hf_cache:/root/.cache/huggingface
+        restart: unless-stopped
+        environment:
+            - PYTHONPATH=/app
+            - KAFKA_BOOTSTRAP=kafka:9092
+            - BOOTSTRAP_SERVERS=kafka:9092
+            - KAFKA_BROKER=kafka:9092
+
+    ingestion:
+        build: .
+        container_name: bustedurl-ingestion
+        env_file: .env
+        depends_on:
+            kafka:
+                condition: service_healthy
+        command: ["python", "real_time_data_ingestion.py"]
+        volumes:
+            - ./:/app
+        restart: unless-stopped
+        environment:
+            - PYTHONPATH=/app
+
+    celeryworker:
+        build: .
+        container_name: bustedurl-celery
+        env_file: .env
+        depends_on:
+            kafka:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        command: ["celery", "-A", "celery_worker", "worker", "--loglevel=info"]
+        volumes:
+            - ./:/app
+        restart: unless-stopped
+        environment:
+            - PYTHONPATH=/app
+
+volumes:
+    kafka_data:
+    redis_data:
+    hf_cache:
