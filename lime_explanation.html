@@ -37089,25 +37089,25 @@
 /***/ })
 /******/ ]);
 //# sourceMappingURL=bundle.js.map </script></head><body>
-        <div class="lime top_div" id="top_divO7ANKO3WEBM0ZUR"></div>
+        <div class="lime top_div" id="top_divBX2CNBEI50ROSJ0"></div>
         
         <script>
-        var top_div = d3.select('#top_divO7ANKO3WEBM0ZUR').classed('lime top_div', true);
+        var top_div = d3.select('#top_divBX2CNBEI50ROSJ0').classed('lime top_div', true);
         
             var pp_div = top_div.append('div')
                                 .classed('lime predict_proba', true);
             var pp_svg = pp_div.append('svg').style('width', '100%');
-            var pp = new lime.PredictProba(pp_svg, ["benign", "malicious"], [0.9536287432778481, 0.046371256722151886]);
+            var pp = new lime.PredictProba(pp_svg, ["benign", "malicious"], [0.11050837816613412, 0.8894916218338659]);
             
         
         var exp_div;
             var exp = new lime.Explanation(["benign", "malicious"]);
         
                 exp_div = top_div.append('div').classed('lime explanation', true);
-                exp.show([["www.", 0.4805230211062083], ["https:", 0.18244531377139336], ["benoit+gosselin", -0.09733871209077716], ["/", 0.03794598855143168], ["123people.", -0.037157702069158305], ["com/", -0.017498662992452316]], 0, exp_div);
+                exp.show([["insai.", 0.06495574127218778], ["gob.", 0.017826766148759467], ["ve", 0.005683738322893653]], 1, exp_div);
                 
         var raw_div = top_div.append('div');
-            exp.show_raw_text([["www.", 8, 0.4805230211062083], ["https:", 0, 0.18244531377139336], ["benoit+gosselin", 28, -0.09733871209077716], ["/", 6, 0.03794598855143168], ["/", 7, 0.03794598855143168], ["123people.", 12, -0.037157702069158305], ["com/", 22, -0.017498662992452316]], 0, "https://www.123people.com/b/benoit+gosselin", raw_div, true);
+            exp.show_raw_text([["insai.", 0, 0.06495574127218778], ["gob.", 6, 0.017826766148759467], ["ve", 10, 0.005683738322893653]], 1, "insai.gob.ve", raw_div, true);
             
         </script>
         </body></html>

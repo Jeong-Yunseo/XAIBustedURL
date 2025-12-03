@@ -3,6 +3,9 @@ import pandas as pd
 from lime.lime_text import LimeTextExplainer
 import random
 
+from dataset.make_url_list_malicious import load_malicious_urls
+from dataset.make_url_list_benign import load_final_list
+
 # load BustedURL model
 from src.ensemble_model import EnsembleModel
 
@@ -78,6 +81,8 @@ def get_urls():
 
 # RUN
 if __name__=="__main__":
-    url_list = get_urls()
+#    url_list = get_urls()
+    url_list = load_final_list() # benign urls
+#    url_list = load_malicious_urls() # malicious urls
     for url in url_list:
         explain_url(url)
